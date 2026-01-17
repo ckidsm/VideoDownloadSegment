@@ -40,3 +40,8 @@ Save/
 # ffmpeg 산출물(명시)
 output.mp4
 merged.ts
+
+# PyInstaller 빌드
+build/
+dist/
+*.spec

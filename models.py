@@ -1,0 +1,16 @@
+from dataclasses import dataclass
+from typing import Optional, Dict
+
+@dataclass
+class JobConfig:
+    base_folder_url: str
+    save_dir: str
+    out_name: str
+    start: int = 1
+    zero_pad: int = 4
+    end: Optional[int] = None
+    stop_after_n_404: int = 10
+    retry: int = 5
+    timeout: int = 30
+    headers: Optional[Dict[str, str]] = None
+    auto_detect: bool = True  # 시작/끝번호 자동 탐지 여부

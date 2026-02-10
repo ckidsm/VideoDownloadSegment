@@ -3,7 +3,10 @@ import time
 import uuid
 import requests
 import subprocess
-from models import JobConfig
+import re
+import json
+import yt_dlp
+from models import JobConfig, VideoType
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -238,3 +241,111 @@ class DownloadWorker(QThread):
             # 전체 루프에서 예외 발생 시 정리 후 실패 신호
             self._cleanup_temp_file()
             self.done.emit(False, f"오류: {e}")
+
+
+class PornhubDownloadWorker(QThread):
+    """Pornhub 비디오 다운로드 워커 (yt-dlp 사용)"""
+
+    progress = pyqtSignal(int, int)   # (다운로드 바이트, 전체 바이트)
+    status   = pyqtSignal(str)        # 상태 메시지
+    done     = pyqtSignal(bool, str)  # 완료 여부, 메시지
+
+    def __init__(self, cfg: JobConfig, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self._stop = False
+        self._downloaded_bytes = 0
+        self._total_bytes = 0
+
+    def stop(self):
+        """외부(UI)에서 호출하면 루프가 멈춤"""
+        self._stop = True
+
+    def _progress_hook(self, d):
+        """yt-dlp 진행 상황 콜백"""
+        if self._stop:
+            raise Exception("사용자에 의해 중단됨")
+
+        if d['status'] == 'downloading':
+            self._downloaded_bytes = d.get('downloaded_bytes', 0)
+            self._total_bytes = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
+            self.progress.emit(self._downloaded_bytes, self._total_bytes)
+
+        elif d['status'] == 'finished':
+            self.status.emit("다운로드 완료, 처리 중...")
+
+    def run(self):
+        """다운로드 실행"""
+        out_path = None
+        try:
+            url = self.cfg.base_folder_url.strip()
+
+            # 출력 디렉토리 생성
+            out_dir = self.cfg.save_dir or os.getcwd()
+            os.makedirs(out_dir, exist_ok=True)
+
+            # 고유 ID로 파일명 생성
+            unique_id = uuid.uuid4().hex[:6]
+            base_name, ext = os.path.splitext(self.cfg.out_name or "output.mp4")
+            if not ext:
+                ext = ".mp4"
+            out_path = os.path.join(out_dir, f"{base_name}_{unique_id}{ext}")
+
+            self.status.emit("비디오 정보 가져오는 중...")
+
+            # yt-dlp 옵션 설정
+            ydl_opts = {
+                'format': 'worst[ext=mp4]/worst',  # 가장 낮은 화질로 테스트 (다운로드 속도 최대화)
+                'outtmpl': out_path,
+                'progress_hooks': [self._progress_hook],
+                'quiet': False,  # 디버깅을 위해 로그 출력
+                'no_warnings': False,
+                'nocheckcertificate': True,
+                # 타임아웃 및 재시도 설정
+                'socket_timeout': 120,  # 소켓 타임아웃 더 증가
+                'retries': 20,  # 재시도 횟수 더 증가
+                'fragment_retries': 20,  # 프래그먼트 재시도
+                'file_access_retries': 10,  # 파일 접근 재시도
+                # HTTP 청크 크기 설정 (작은 청크로 타임아웃 방지)
+                'http_chunk_size': 524288,  # 512KB 청크 (더 작게)
+                # 버퍼 크기 설정
+                'buffersize': 1024,
+                # 사용자 정의 헤더가 있으면 사용
+                'http_headers': self.cfg.headers if self.cfg.headers else {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Sec-Fetch-Mode': 'navigate',
+                }
+            }
+
+            # 브라우저 쿠키 사용 시도 (에러 무시)
+            try:
+                ydl_opts['cookiesfrombrowser'] = ('chrome',)
+            except:
+                pass
+
+            self.status.emit("비디오 다운로드 중...")
+
+            # yt-dlp로 다운로드
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            # 다운로드 완료
+            if os.path.exists(out_path):
+                self.done.emit(True, out_path)
+            else:
+                self.done.emit(False, "다운로드는 완료되었으나 파일을 찾을 수 없습니다.")
+
+        except Exception as e:
+            if self._stop:
+                self.done.emit(False, "사용자에 의해 중단됨")
+            else:
+                self.done.emit(False, f"오류: {e}")
+
+            # 실패 시 부분 다운로드 파일 삭제
+            if out_path and os.path.exists(out_path):
+                try:
+                    os.remove(out_path)
+                except:
+                    pass

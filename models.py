@@ -1,11 +1,17 @@
 from dataclasses import dataclass
 from typing import Optional, Dict
+from enum import Enum
+
+class VideoType(Enum):
+    YASYA = "yasya"
+    PORNHUB = "pornhub"
 
 @dataclass
 class JobConfig:
     base_folder_url: str
     save_dir: str
     out_name: str
+    video_type: VideoType = VideoType.YASYA
     start: int = 1
     zero_pad: int = 4
     end: Optional[int] = None

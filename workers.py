@@ -10,6 +10,54 @@ from models import JobConfig, VideoType
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
+def resolve_yasya_url(page_url: str, status_callback=None) -> str:
+    """yasyadong.tv 페이지 URL에서 세그먼트 베이스 URL을 자동 추출.
+    Chrome을 headless로 열어 네트워크 요청과 페이지 소스를 분석한다.
+    반환: 'https://yavidssgood.com/HASH/' 형태의 베이스 URL
+    """
+    import undetected_chromedriver as uc
+
+    if status_callback:
+        status_callback("Chrome 브라우저로 페이지 로딩 중...")
+
+    options = uc.ChromeOptions()
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-gpu')
+    options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+
+    driver = uc.Chrome(options=options)
+    try:
+        driver.get(page_url)
+        time.sleep(10)
+
+        if status_callback:
+            status_callback("네트워크 요청에서 세그먼트 URL 탐색 중...")
+
+        # 1) 네트워크 로그에서 segment URL 찾기
+        logs = driver.get_log('performance')
+        for entry in logs:
+            try:
+                msg = json.loads(entry['message'])['message']
+                if msg['method'] == 'Network.requestWillBeSent':
+                    url = msg['params']['request']['url']
+                    m = re.match(r'(https?://[^/]+/[A-Za-z0-9]+/)segment_\d+\.jpg', url)
+                    if m:
+                        return m.group(1)
+            except Exception:
+                pass
+
+        # 2) 페이지 소스에서 items1.shtml 패턴으로 베이스 URL 추출
+        source = driver.page_source
+        m = re.search(r'(https?://[^/]+/[A-Za-z0-9]+/)items\d*\.shtml', source)
+        if m:
+            return m.group(1)
+
+        raise RuntimeError("세그먼트 URL을 찾지 못했습니다. 페이지를 확인하세요.")
+    finally:
+        driver.quit()
+
+
 class DownloadWorker(QThread):
     """QThread 기반 다운로드 워커 - 스레드 안전한 시그널 emit"""
 
@@ -110,8 +158,19 @@ class DownloadWorker(QThread):
         out_mp4 = None
 
         try:
+            # yasyadong.tv 페이지 URL이면 세그먼트 URL 자동 추출
+            url = self.cfg.base_folder_url.strip()
+            if 'yasyadong' in url and ('_Action=items' in url or 'items_id' in url):
+                try:
+                    resolved = resolve_yasya_url(url, status_callback=lambda msg: self.status.emit(msg))
+                    self.status.emit(f"세그먼트 URL 발견: {resolved}")
+                    url = resolved
+                except Exception as e:
+                    self.done.emit(False, f"URL 추출 실패: {e}")
+                    return
+
             # segment_0001.jpg 같은 형태로 URL 조합
-            base = self._normalize_url(self.cfg.base_folder_url) + "segment_"
+            base = self._normalize_url(url) + "segment_"
             session = requests.Session()
             headers = self.cfg.headers or {}
             out_dir = self.cfg.save_dir or os.getcwd()

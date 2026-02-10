@@ -45,16 +45,15 @@ class App(QWidget):
         # ── 비디오 소스 선택
         source_layout = QHBoxLayout()
         source_layout.addWidget(QLabel("비디오 소스:"))
-        self.yasya_radio = QRadioButton("Yasya (세그먼트)")
-        self.porn_radio = QRadioButton("Pornhub")
-        self.yasya_radio.setChecked(True)
-
+        self.radio_yasya = QRadioButton("세그먼트 (Yasya)")
+        self.radio_pornhub = QRadioButton("Pornhub (yt-dlp)")
+        self.radio_yasya.setChecked(True)
         self.source_group = QButtonGroup(self)
-        self.source_group.addButton(self.yasya_radio)
-        self.source_group.addButton(self.porn_radio)
-
-        source_layout.addWidget(self.yasya_radio)
-        source_layout.addWidget(self.porn_radio)
+        self.source_group.addButton(self.radio_yasya)
+        self.source_group.addButton(self.radio_pornhub)
+        self.source_group.buttonClicked.connect(self._on_source_changed)
+        source_layout.addWidget(self.radio_yasya)
+        source_layout.addWidget(self.radio_pornhub)
         source_layout.addStretch()
         v.addLayout(source_layout)
 
@@ -154,6 +153,21 @@ class App(QWidget):
         self._update_timer.start(1000)
 
     # ---------- helpers ----------
+    def _on_source_changed(self, btn):
+        """비디오 소스 라디오 버튼 변경 시 세그먼트 옵션 활성/비활성"""
+        is_segment = (btn == self.radio_yasya)
+        self.auto_detect_chk.setEnabled(is_segment)
+        self.start_spin.setEnabled(is_segment and not self.auto_detect_chk.isChecked())
+        self.end_spin.setEnabled(is_segment and not self.auto_detect_chk.isChecked())
+        self.pad_spin.setEnabled(is_segment)
+        self.stop404_spin.setEnabled(is_segment and not self.auto_detect_chk.isChecked())
+
+    def _get_video_type(self) -> VideoType:
+        """현재 선택된 비디오 소스 타입 반환"""
+        if self.radio_pornhub.isChecked():
+            return VideoType.PORNHUB
+        return VideoType.YASYA
+
     def _on_auto_detect_changed(self, state):
         """자동 탐지 체크박스 상태 변경 시"""
         enabled = state != Qt.CheckState.Checked.value
@@ -232,21 +246,6 @@ class App(QWidget):
             self._progress_status[row]['text'] = text
             self._progress_status[row]['updated'] = True
 
-    def _on_pornhub_progress(self, row: int, downloaded: int, total: int):
-        """Pornhub 다운로드 프로그래스 핸들러"""
-        if total > 0:
-            percent = int((downloaded / total) * 100)
-            downloaded_mb = downloaded / (1024 * 1024)
-            total_mb = total / (1024 * 1024)
-            text = f"{percent}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)"
-        else:
-            downloaded_mb = downloaded / (1024 * 1024)
-            text = f"{downloaded_mb:.1f} MB"
-
-        if row in self._progress_status:
-            self._progress_status[row]['text'] = text
-            self._progress_status[row]['updated'] = True
-
     def _on_status(self, row: int, msg: str):
         """상태 시그널 핸들러 - 상태만 저장"""
         if row in self._progress_status:
@@ -289,7 +288,6 @@ class App(QWidget):
             import traceback
             traceback.print_exc()
             print(f"add_job error: {e}", flush=True)
-            QMessageBox.critical(self, "오류", f"작업 추가 중 오류 발생:\n{str(e)}")
 
     def _add_job_impl(self):
         url = (self.url_edit.text() or "").strip()
@@ -333,16 +331,6 @@ class App(QWidget):
 
     def _start_row(self, row: int):
         """특정 행의 다운로드 시작"""
-        try:
-            self._start_row_impl(row)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"_start_row error: {e}", flush=True)
-            QMessageBox.critical(self, "오류", f"다운로드 시작 중 오류 발생:\n{str(e)}")
-
-    def _start_row_impl(self, row: int):
-        """특정 행의 다운로드 시작 (구현)"""
         # 헤더 파싱
         try:
             headers = self.parse_headers()
@@ -374,10 +362,8 @@ class App(QWidget):
         out_name = self._sanitize_filename(raw_name)
         os.makedirs(save_dir, exist_ok=True)
 
-        # 비디오 타입 결정
-        video_type = VideoType.PORNHUB if self.porn_radio.isChecked() else VideoType.YASYA
-
         # 잡 설정
+        video_type = self._get_video_type()
         auto_detect = self.auto_detect_chk.isChecked()
         cfg = JobConfig(
             base_folder_url=url_text,
@@ -394,27 +380,20 @@ class App(QWidget):
             auto_detect=auto_detect,
         )
 
-        # QThread 기반 워커 생성 (비디오 타입에 따라)
+        # 비디오 타입에 따라 적절한 워커 생성
         if video_type == VideoType.PORNHUB:
             worker = PornhubDownloadWorker(cfg, parent=self)
         else:
             worker = DownloadWorker(cfg, parent=self)
-
         self.workers[row] = worker
 
-        # 세그먼트 범위를 저장할 딕셔너리 초기화 (Yasya 전용)
-        if video_type == VideoType.YASYA:
-            if not hasattr(self, '_segment_info'):
-                self._segment_info = {}
-            self._segment_info[row] = {'start': None, 'end': None}
+        # 세그먼트 범위를 저장할 딕셔너리 초기화
+        if not hasattr(self, '_segment_info'):
+            self._segment_info = {}
+        self._segment_info[row] = {'start': None, 'end': None}
 
         # 시그널 핸들러 연결
-        if video_type == VideoType.PORNHUB:
-            # Pornhub는 다른 progress 시그널 (바이트 단위)
-            worker.progress.connect(lambda downloaded, total, r=row: self._on_pornhub_progress(r, downloaded, total))
-        else:
-            worker.progress.connect(lambda seg, size, r=row: self._on_progress(r, seg, size))
-
+        worker.progress.connect(lambda seg, size, r=row: self._on_progress(r, seg, size))
         worker.status.connect(lambda msg, r=row: self._on_status(r, msg))
         worker.done.connect(lambda success, msg, r=row: self._on_done(r, success, msg))
 
@@ -422,15 +401,6 @@ class App(QWidget):
         worker.start()
 
     def start_selected(self):
-        try:
-            self._start_selected_impl()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"start_selected error: {e}", flush=True)
-            QMessageBox.critical(self, "오류", f"다운로드 시작 중 오류 발생:\n{str(e)}")
-
-    def _start_selected_impl(self):
         # 1) 헤더 파싱
         try:
             headers = self.parse_headers()
@@ -471,10 +441,8 @@ class App(QWidget):
             out_name = self._sanitize_filename(raw_name)
             os.makedirs(save_dir, exist_ok=True)
 
-            # 3) 비디오 타입 결정
-            video_type = VideoType.PORNHUB if self.porn_radio.isChecked() else VideoType.YASYA
-
-            # 4) 잡 설정
+            # 3) 잡 설정
+            video_type = self._get_video_type()
             auto_detect = self.auto_detect_chk.isChecked()
             cfg = JobConfig(
                 base_folder_url=url_text,
@@ -491,31 +459,24 @@ class App(QWidget):
                 auto_detect=auto_detect,
             )
 
-            # 5) QThread 기반 워커 생성 (비디오 타입에 따라)
+            # 4) 비디오 타입에 따라 적절한 워커 생성
             if video_type == VideoType.PORNHUB:
                 worker = PornhubDownloadWorker(cfg, parent=self)
             else:
                 worker = DownloadWorker(cfg, parent=self)
-
             self.workers[row] = worker
 
-            # 6) 세그먼트 범위를 저장할 딕셔너리 초기화 (Yasya 전용)
-            if video_type == VideoType.YASYA:
-                if not hasattr(self, '_segment_info'):
-                    self._segment_info = {}
-                self._segment_info[row] = {'start': None, 'end': None}
+            # 5) 세그먼트 범위를 저장할 딕셔너리 초기화
+            if not hasattr(self, '_segment_info'):
+                self._segment_info = {}
+            self._segment_info[row] = {'start': None, 'end': None}
 
-            # 7) 시그널 핸들러 연결
-            if video_type == VideoType.PORNHUB:
-                # Pornhub는 다른 progress 시그널 (바이트 단위)
-                worker.progress.connect(lambda downloaded, total, r=row: self._on_pornhub_progress(r, downloaded, total))
-            else:
-                worker.progress.connect(lambda seg, size, r=row: self._on_progress(r, seg, size))
-
+            # 6) 시그널 핸들러 연결
+            worker.progress.connect(lambda seg, size, r=row: self._on_progress(r, seg, size))
             worker.status.connect(lambda msg, r=row: self._on_status(r, msg))
             worker.done.connect(lambda success, msg, r=row: self._on_done(r, success, msg))
 
-            # 8) QThread 시작
+            # 7) QThread 시작
             worker.start()
             started += 1
 

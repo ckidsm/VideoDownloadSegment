@@ -2,3 +2,5 @@ PyQt6>=6.9.0
 requests>=2.31.0
 pyinstaller>=6.0.0
 yt-dlp>=2025.10.0
+selenium>=4.0.0
+undetected-chromedriver>=3.5.0
